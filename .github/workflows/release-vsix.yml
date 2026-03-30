@@ -1,0 +1,55 @@
+# INPUT  - package.json, package-lock.json, src/, mcp-server/, media/ and git refs
+# OUTPUT - GitHub Actions artifact and optional GitHub Release asset named *.vsix
+# POS    - 发布流水线入口；源码不入库制品，由 CI 统一生成
+
+name: Release VSIX
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package VSIX
+        run: npm run package
+
+      - name: Detect VSIX filename
+        id: vsix
+        run: |
+          set -eu
+          file="$(find . -maxdepth 1 -type f -name '*.vsix' | head -n 1)"
+          test -n "$file"
+          echo "path=${file#./}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vsix.outputs.path }}
+          path: ${{ steps.vsix.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.vsix.outputs.path }}

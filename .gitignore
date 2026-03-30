@@ -1,4 +1,5 @@
 node_modules/
 dist/
+*.vsix
 .DS_Store
 .cursor-loop/

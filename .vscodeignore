@@ -2,6 +2,10 @@ src/**
 mcp-server/**
 node_modules/**
 .vscode/**
+.github/**
 tsconfig.json
-*.map
+**/*.map
 .gitignore
+AGENTS.md
+**/AGENTS.md
+*.vsix

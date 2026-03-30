@@ -5,6 +5,10 @@
   "version": "1.0.0",
   "publisher": "local",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:AiToby/cursor-loop.git"
+  },
   "engines": {
     "vscode": "^1.80.0"
   },
