@@ -1,0 +1,7 @@
+src/**
+mcp-server/**
+node_modules/**
+.vscode/**
+tsconfig.json
+*.map
+.gitignore

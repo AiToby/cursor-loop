@@ -1,0 +1,72 @@
+{
+  "name": "cursor-loop",
+  "displayName": "Cursor Loop",
+  "description": "通过 MCP 旁路通道与 Cursor AI 持续对话，无需在聊天框手动输入",
+  "version": "1.0.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cursorLoop",
+          "title": "Cursor Loop",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "cursorLoop": [
+        {
+          "type": "webview",
+          "id": "cursorLoop.mainView",
+          "name": "Cursor Loop"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cursorLoop.setupMcp",
+        "title": "Cursor Loop: 安装 MCP 配置"
+      },
+      {
+        "command": "cursorLoop.removeMcp",
+        "title": "Cursor Loop: 卸载 MCP 配置"
+      },
+      {
+        "command": "cursorLoop.sendFile",
+        "title": "Cursor Loop: 发送文件到对话"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "cursorLoop.sendFile",
+          "group": "navigation@100"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap",
+    "compile:mcp": "esbuild mcp-server/index.ts --bundle --outfile=dist/mcp-server.mjs --format=esm --platform=node --sourcemap",
+    "compile": "npm run compile:ext && npm run compile:mcp",
+    "watch": "npm run compile:ext -- --watch",
+    "package": "npm run compile && npx @vscode/vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.0.0"
+  }
+}
