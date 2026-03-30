@@ -2,6 +2,7 @@ src/**
 mcp-server/**
 node_modules/**
 .vscode/**
+.cursor/**
 .github/**
 tsconfig.json
 **/*.map

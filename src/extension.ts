@@ -32,6 +32,11 @@ import {
   resetSessions,
   setupMcpConfig,
   removeMcpConfig,
+  readHistory,
+  addToHistory,
+  clearHistory,
+  readStatus,
+  writeStatus,
 } from "./ipc";
 
 let mainPanel: vscode.WebviewView | undefined;
@@ -39,8 +44,12 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 let lastQuestionId: string | undefined;
 let lastReplyTimestamp: string | undefined;
 let lastQueueCount: number | undefined;
+let lastStatusState: string | undefined;
 let chatTriggered = false;
 let currentDataDir = "";
+let lastSendTime = 0;
+let idleCompressTimer: ReturnType<typeof setTimeout> | undefined;
+const IDLE_COMPRESS_MS = 5 * 60 * 1000; // 5 min
 
 function computeDataDir(workspaceFolders: readonly vscode.WorkspaceFolder[]): string {
   const rootDir = path.join(os.homedir(), ".cursor-loop");
@@ -154,10 +163,37 @@ function startPolling() {
       mainPanel.webview.postMessage({ type: "queueData", data: readQueue() });
       lastQueueCount = count;
     }
+
+    const status = readStatus();
+    const stateStr = getDisplayState(status);
+    if (stateStr !== lastStatusState) {
+      mainPanel.webview.postMessage({ type: "statusUpdate", data: status, display: stateStr });
+      lastStatusState = stateStr;
+    }
   };
 
   poll();
   pollTimer = setInterval(poll, 500);
+}
+
+function getDisplayState(status: { state: string; lastHeartbeat: number }): string {
+  const elapsed = Date.now() - (status.lastHeartbeat || 0);
+  if (status.state === "waiting" && elapsed < 30_000) return "waiting";
+  if (status.state === "processing" && elapsed < 60_000) return "processing";
+  if (status.state === "waiting" && elapsed >= 30_000) return "stale";
+  return "idle";
+}
+
+function resetIdleCompressTimer() {
+  if (idleCompressTimer) clearTimeout(idleCompressTimer);
+  if (!chatTriggered) return;
+  idleCompressTimer = setTimeout(() => {
+    sendText("[system] 闲置超过 5 分钟，请压缩上下文以节约 token。");
+    mainPanel?.webview.postMessage({
+      type: "showReply",
+      data: { content: "已自动发送上下文压缩请求", timestamp: new Date().toISOString() },
+    });
+  }, IDLE_COMPRESS_MS);
 }
 
 // ─── 自动安装 MCP ─────────────────────────────────
@@ -192,6 +228,9 @@ function handleOutgoingText(text: string, tag?: string) {
   const trimmed = text.trim();
   if (!trimmed) return;
   sendText(trimmed, tag);
+  addToHistory({ type: "text", content: trimmed, timestamp: new Date().toISOString() });
+  lastSendTime = Date.now();
+  resetIdleCompressTimer();
   if (!chatTriggered) {
     void triggerCursorChat();
   }
@@ -292,6 +331,19 @@ class LoopViewProvider implements vscode.WebviewViewProvider {
         case "interruptChat":
           await this.handleInterrupt(msg.text);
           break;
+        case "reactivateSession":
+          await this.handleReactivate();
+          break;
+        case "getHistory":
+          mainPanel?.webview.postMessage({ type: "historyData", data: readHistory() });
+          break;
+        case "clearHistory":
+          clearHistory();
+          mainPanel?.webview.postMessage({ type: "historyData", data: [] });
+          break;
+        case "resendHistory":
+          if (msg.content) handleOutgoingText(msg.content, msg.tag);
+          break;
       }
     });
 
@@ -360,10 +412,24 @@ class LoopViewProvider implements vscode.WebviewViewProvider {
     try {
       await vscode.commands.executeCommand("workbench.action.chat.stop");
     } catch {}
+    writeStatus({ state: "idle" });
+    lastStatusState = undefined;
     if (newText?.trim()) {
       await new Promise((r) => setTimeout(r, 500));
       handleOutgoingText(newText.trim());
     }
+  }
+
+  private async handleReactivate() {
+    try {
+      await vscode.commands.executeCommand("workbench.action.chat.stop");
+    } catch {}
+    await new Promise((r) => setTimeout(r, 300));
+    writeStatus({ state: "idle" });
+    lastStatusState = undefined;
+    chatTriggered = false;
+    sendText("[system] 会话恢复 — 上次对话可能因网络波动中断，请继续处理。如果之前有未完成的任务，请继续；否则等待新指令。");
+    void triggerCursorChat();
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -375,7 +441,7 @@ class LoopViewProvider implements vscode.WebviewViewProvider {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">
 <style nonce="${nonce}">
-:root{--bg:var(--vscode-sideBar-background);--fg:var(--vscode-foreground);--fg2:var(--vscode-descriptionForeground);--input-bg:var(--vscode-input-background);--input-border:var(--vscode-input-border,transparent);--btn-bg:var(--vscode-button-background);--btn-fg:var(--vscode-button-foreground);--btn-hover:var(--vscode-button-hoverBackground);--border:var(--vscode-widget-border,rgba(128,128,128,0.2));--badge-bg:var(--vscode-badge-background);--badge-fg:var(--vscode-badge-foreground);--error:var(--vscode-errorForeground,#f44);--success:#22c55e;--radius:6px}
+:root{--bg:var(--vscode-sideBar-background);--fg:var(--vscode-foreground);--fg2:var(--vscode-descriptionForeground);--input-bg:var(--vscode-input-background);--input-border:var(--vscode-input-border,transparent);--btn-bg:var(--vscode-button-background);--btn-fg:var(--vscode-button-foreground);--btn-hover:var(--vscode-button-hoverBackground);--border:var(--vscode-widget-border,rgba(128,128,128,0.2));--badge-bg:var(--vscode-badge-background);--badge-fg:var(--vscode-badge-foreground);--error:var(--vscode-errorForeground,#f44);--success:#22c55e;--warn:#f59e0b;--radius:6px}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:var(--vscode-font-family);font-size:13px;color:var(--fg);background:var(--bg);padding:8px}
 .section{margin-bottom:12px}
@@ -386,15 +452,16 @@ textarea:focus{border-color:var(--btn-bg)}
 textarea::placeholder{color:var(--fg2)}
 .btn-row{display:flex;gap:6px;margin-top:6px;align-items:center;flex-wrap:wrap}
 .btn{padding:5px 12px;border:none;border-radius:var(--radius);font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .1s}
+.btn-sm{padding:3px 8px;font-size:11px}
 .btn-primary{background:var(--btn-bg);color:var(--btn-fg)}
 .btn-primary:hover{background:var(--btn-hover)}
 .btn-primary:disabled{opacity:.4;cursor:not-allowed}
 .btn-secondary{background:transparent;border:1px solid var(--border);color:var(--fg2)}
 .btn-secondary:hover{background:rgba(128,128,128,0.1)}
 .btn-danger{background:rgba(255,68,68,0.1);color:var(--error);border:1px solid rgba(255,68,68,0.15)}
+.btn-warn{background:rgba(245,158,11,0.1);color:var(--warn);border:1px solid rgba(245,158,11,0.2)}
 .hint{font-size:11px;color:var(--fg2);flex:1}
 .card{border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;overflow:hidden}
-.card-head{padding:8px 10px;font-size:12px;font-weight:600;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
 .card-body{padding:10px}
 .q-text{font-size:13px;font-weight:600;margin-bottom:8px;line-height:1.4}
 .q-opt{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);margin-bottom:4px;cursor:pointer;font-size:12px;transition:all .1s}
@@ -415,9 +482,35 @@ textarea::placeholder{color:var(--fg2)}
 .empty{text-align:center;padding:16px;color:var(--fg2);font-size:12px}
 .hidden{display:none!important}
 .drag-over{outline:2px dashed var(--btn-bg);outline-offset:-2px;background:rgba(var(--vscode-button-background),0.05)}
+.status-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:var(--radius);font-size:11px;margin-bottom:10px;border:1px solid var(--border)}
+.status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.status-dot.waiting{background:var(--success);animation:pulse 2s infinite}
+.status-dot.processing{background:#60a5fa;animation:pulse 1s infinite}
+.status-dot.stale{background:var(--warn)}
+.status-dot.idle{background:var(--fg2);opacity:0.4}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.status-text{flex:1;color:var(--fg2)}
+.hist-item{padding:5px 8px;font-size:11px;color:var(--fg2);border-bottom:1px solid rgba(128,128,128,0.1);display:flex;align-items:center;gap:6px;cursor:default}
+.hist-item:last-child{border-bottom:none}
+.hist-content{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hist-resend{font-size:10px;padding:2px 6px;border-radius:3px;border:1px solid var(--border);background:none;color:var(--fg2);cursor:pointer;flex-shrink:0}
+.hist-resend:hover{background:rgba(128,128,128,0.1)}
+.hist-time{font-size:9px;color:var(--fg2);opacity:0.6;flex-shrink:0}
+.collapsible-header{cursor:pointer;user-select:none}
+.collapsible-header:hover{opacity:0.8}
+.collapse-icon{display:inline-block;transition:transform .2s;font-size:10px}
+.collapse-icon.open{transform:rotate(90deg)}
 </style>
 </head>
 <body>
+
+<!-- 连接状态 -->
+<div id="statusBar" class="status-bar">
+  <span id="statusDot" class="status-dot idle"></span>
+  <span id="statusText" class="status-text">未连接</span>
+  <button class="btn btn-warn btn-sm hidden" id="btnReactivate">重新激活</button>
+</div>
+
 <!-- 发送消息 -->
 <div class="section">
   <div class="section-title">发送消息</div>
@@ -425,8 +518,8 @@ textarea::placeholder{color:var(--fg2)}
     <textarea id="msgInput" placeholder="输入消息发送给 AI...&#10;Enter 发送，Shift+Enter 换行" rows="3"></textarea>
     <div class="btn-row">
       <span class="hint">支持拖拽图片/文件</span>
-      <button class="btn btn-secondary" id="btnImg">图片</button>
-      <button class="btn btn-secondary" id="btnFile">文件</button>
+      <button class="btn btn-secondary btn-sm" id="btnImg">图片</button>
+      <button class="btn btn-secondary btn-sm" id="btnFile">文件</button>
       <button class="btn btn-primary" id="btnSend" disabled>发送</button>
     </div>
   </div>
@@ -434,7 +527,7 @@ textarea::placeholder{color:var(--fg2)}
 
 <!-- AI 提问 -->
 <div id="questionSection" class="section hidden">
-  <div class="section-title">AI 提问 <span class="badge">等待回答</span></div>
+  <div class="section-title">AI 提问 <span class="badge" style="background:var(--warn);color:#000">等待回答</span></div>
   <div class="card">
     <div id="questionBody" class="card-body"></div>
   </div>
@@ -447,7 +540,7 @@ textarea::placeholder{color:var(--fg2)}
     <div class="card-body">
       <div id="replyContent" class="reply-content"></div>
       <div class="btn-row" style="justify-content:flex-end;margin-top:8px">
-        <button class="btn btn-secondary" id="btnAckReply">已阅</button>
+        <button class="btn btn-secondary btn-sm" id="btnAckReply">已阅</button>
       </div>
     </div>
   </div>
@@ -457,8 +550,9 @@ textarea::placeholder{color:var(--fg2)}
 <div class="section">
   <div class="section-title">控制</div>
   <div class="btn-row">
-    <button class="btn btn-danger" id="btnInterrupt">中断当前对话</button>
-    <span class="hint">停止 AI 回复，可输入新指令后重发</span>
+    <button class="btn btn-danger btn-sm" id="btnInterrupt">中断对话</button>
+    <button class="btn btn-warn btn-sm" id="btnReactivate2">恢复会话</button>
+    <span class="hint">中断停止 AI；恢复用于卡住时</span>
   </div>
 </div>
 
@@ -473,14 +567,32 @@ textarea::placeholder{color:var(--fg2)}
   </div>
 </div>
 
+<!-- 发送历史 -->
+<div class="section">
+  <div class="section-title collapsible-header" id="historyToggle">
+    <span class="collapse-icon" id="historyIcon">▶</span> 发送历史
+  </div>
+  <div id="historyPanel" class="hidden">
+    <div class="card">
+      <div id="historyList"><div class="empty">暂无历史</div></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-danger btn-sm hidden" id="btnClearHistory">清空历史</button>
+    </div>
+  </div>
+</div>
+
 <!-- 使用提示 -->
 <div class="section">
-  <div class="section-title">使用说明</div>
-  <div style="font-size:11px;color:var(--fg2);line-height:1.5">
-    <p>1. 确认 Settings → Tools & MCP 中 <b>cursor-loop</b> 已启用（绿色）</p>
+  <div class="section-title collapsible-header" id="helpToggle">
+    <span class="collapse-icon" id="helpIcon">▶</span> 使用说明
+  </div>
+  <div id="helpPanel" class="hidden" style="font-size:11px;color:var(--fg2);line-height:1.5">
+    <p>1. 确认 Settings → MCP 中 <b>cursor-loop</b> 已启用（绿色）</p>
     <p>2. 开一个<b>新的 Chat 对话</b>，从侧边栏发送第一条消息</p>
-    <p>3. AI 会在 Chat 窗口中回复，并自动等待你的下一条消息</p>
-    <p style="margin-top:4px;opacity:0.7">如首次安装，需重启 Cursor 让 MCP 生效</p>
+    <p>3. AI 在 Chat 中回复，自动等待下一条消息</p>
+    <p>4. 如遇卡住（>30s 无响应），点击<b>恢复会话</b></p>
+    <p style="margin-top:4px;opacity:0.7">首次安装需重启 Cursor 让 MCP 生效</p>
   </div>
 </div>
 
@@ -560,11 +672,15 @@ textarea::placeholder{color:var(--fg2)}
       h += '</div><input class="q-other" data-qid="'+esc(qi.id)+'" placeholder="补充说明（可选）">';
       if(i<q.questions.length-1) h += '<hr style="border:none;border-top:1px solid var(--border);margin:10px 0">';
     }
-    h += '<div class="btn-row" style="justify-content:flex-end;margin-top:10px"><button class="btn btn-danger" onclick="cancelQ()">取消</button><button class="btn btn-primary" onclick="submitQ()">提交</button></div>';
+    h += '<div class="btn-row" style="justify-content:flex-end;margin-top:10px"><button class="btn btn-danger btn-sm" id="btnCancelQ">取消</button><button class="btn btn-primary" id="btnSubmitQ">提交</button></div>';
     body.innerHTML = h;
     body.querySelectorAll('.q-opt').forEach((el)=>{
       el.addEventListener('click', ()=> toggleOpt(el));
     });
+    const submitBtn = $('btnSubmitQ');
+    const cancelBtn = $('btnCancelQ');
+    if(submitBtn) submitBtn.addEventListener('click', doSubmitQ);
+    if(cancelBtn) cancelBtn.addEventListener('click', doCancelQ);
   }
 
   function toggleOpt(el){
@@ -584,7 +700,7 @@ textarea::placeholder{color:var(--fg2)}
     el.classList.toggle('selected', arr.indexOf(oid)>-1);
   }
 
-  window.submitQ = function(){
+  function doSubmitQ(){
     if(!curQuestion) return;
     const answers = [];
     for(const qi of curQuestion.questions){
@@ -594,18 +710,32 @@ textarea::placeholder{color:var(--fg2)}
     vscode.postMessage({type:'submitAnswer', data:{id:curQuestion.id, answers}});
     $('questionSection').classList.add('hidden');
     curQuestion = null;
-  };
-  window.cancelQ = function(){
+  }
+  function doCancelQ(){
     vscode.postMessage({type:'cancelQuestion'});
     $('questionSection').classList.add('hidden');
     curQuestion = null;
-  };
+  }
 
   // ── AI 回复 ──
   $('btnAckReply').addEventListener('click', ()=>{
     vscode.postMessage({type:'ackReply'});
     $('replySection').classList.add('hidden');
   });
+
+  // ── 状态栏 ──
+  const statusLabels = {waiting:'等待消息中…',processing:'AI 正在处理…',stale:'可能卡住（>30s 无心跳）',idle:'未连接'};
+  function updateStatus(display){
+    $('statusDot').className = 'status-dot '+(display||'idle');
+    $('statusText').textContent = statusLabels[display]||statusLabels.idle;
+    const reBtn = $('btnReactivate');
+    if(display==='stale') reBtn.classList.remove('hidden'); else reBtn.classList.add('hidden');
+  }
+
+  // ── 控制 ──
+  $('btnInterrupt').addEventListener('click', ()=> vscode.postMessage({type:'interruptChat'}));
+  $('btnReactivate').addEventListener('click', ()=> vscode.postMessage({type:'reactivateSession'}));
+  $('btnReactivate2').addEventListener('click', ()=> vscode.postMessage({type:'reactivateSession'}));
 
   // ── 队列 ──
   function renderQueue(items){
@@ -626,9 +756,41 @@ textarea::placeholder{color:var(--fg2)}
   }
   $('btnClearQueue').addEventListener('click', ()=> vscode.postMessage({type:'clearQueue'}));
 
-  // ── 中断 ──
-  $('btnInterrupt').addEventListener('click', ()=>{
-    vscode.postMessage({type:'interruptChat'});
+  // ── 历史 ──
+  let historyOpen = false;
+  $('historyToggle').addEventListener('click', ()=>{
+    historyOpen = !historyOpen;
+    $('historyPanel').classList.toggle('hidden', !historyOpen);
+    $('historyIcon').classList.toggle('open', historyOpen);
+    if(historyOpen) vscode.postMessage({type:'getHistory'});
+  });
+  function renderHistory(items){
+    const L = $('historyList'), btn = $('btnClearHistory');
+    if(!items||!items.length){ L.innerHTML='<div class="empty">暂无历史</div>'; btn.classList.add('hidden'); return; }
+    btn.classList.remove('hidden');
+    let h = '';
+    for(const it of items){
+      const preview = it.type==='text' ? (it.content||'').substring(0,80) : (it.type==='image'?'[图片]':'[文件]');
+      const t = new Date(it.timestamp);
+      const ts = String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
+      h += '<div class="hist-item"><span class="hist-time">'+ts+'</span><span class="hist-content">'+esc(preview)+'</span><button class="hist-resend" data-content="'+esc(it.content||'')+'">重发</button></div>';
+    }
+    L.innerHTML = h;
+    L.querySelectorAll('.hist-resend').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const c = btn.dataset.content;
+        if(c) vscode.postMessage({type:'resendHistory', content:c});
+      });
+    });
+  }
+  $('btnClearHistory').addEventListener('click', ()=> vscode.postMessage({type:'clearHistory'}));
+
+  // ── 帮助折叠 ──
+  let helpOpen = false;
+  $('helpToggle').addEventListener('click', ()=>{
+    helpOpen = !helpOpen;
+    $('helpPanel').classList.toggle('hidden', !helpOpen);
+    $('helpIcon').classList.toggle('open', helpOpen);
   });
 
   // ── 消息处理 ──
@@ -643,6 +805,8 @@ textarea::placeholder{color:var(--fg2)}
         break;
       case 'queueCount': $('queueBadge').textContent = m.count||0; break;
       case 'queueData': renderQueue(m.data); break;
+      case 'statusUpdate': updateStatus(m.display); break;
+      case 'historyData': renderHistory(m.data); break;
     }
   });
 

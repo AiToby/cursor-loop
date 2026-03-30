@@ -2,7 +2,7 @@
   "name": "cursor-loop",
   "displayName": "Cursor Loop",
   "description": "通过 MCP 旁路通道与 Cursor AI 持续对话，无需在聊天框手动输入",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -12,8 +12,12 @@
   "engines": {
     "vscode": "^1.80.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
